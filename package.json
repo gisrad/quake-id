@@ -1,0 +1,44 @@
+{
+  "name": "quake-id",
+  "version": "1.0.0",
+  "description": "Real-time Indonesia earthquake & active fault 3D monitor (BMKG InaTEWS + USGS ComCat) — separates crustal faults, subduction megathrusts & deep Wadati-Benioff slabs with hypocenter cross-section and Palu/Lombok 2018 historical replays.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://quake.transbulent.id",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gisrad/quake-id.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gisrad/quake-id/issues"
+  },
+  "author": "Evans Azka Fajrianshah",
+  "keywords": [
+    "earthquake",
+    "indonesia",
+    "bmkg",
+    "inatews",
+    "usgs",
+    "seismology",
+    "megathrust",
+    "active-faults",
+    "wadati-benioff",
+    "tsunami",
+    "maplibre-gl",
+    "gis",
+    "cloudflare-workers",
+    "cloudflare-d1",
+    "astro"
+  ],
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1 --port 4325",
+    "build": "astro build",
+    "preview": "astro preview --host 127.0.0.1 --port 4325",
+    "bake:replay": "node scripts/bake-replay.mjs",
+    "check:security": "node scripts/security-check.mjs"
+  },
+  "dependencies": {
+    "astro": "5.16.5",
+    "maplibre-gl": "^5.6.0"
+  }
+}

@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+title: "Sentinel Seismik (quake-id): Real-Time Indonesia Earthquake Fusion & Tectonic Regime Classifier"
+message: "If you use this software or methodology in your research, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: "Fajrianshah"
+    given-names: "Evans Azka"
+    affiliation: "National Research and Innovation Agency (BRIN); Graduate School, Universitas Gadjah Mada"
+version: 1.0.0
+date-released: "2026-11-22"
+license: MIT
+url: "https://quake.transbulent.id"
+repository-code: "https://github.com/gisrad/quake-id"
+abstract: >-
+  Real-time 3D WebGIS platform and Cloudflare edge ingestion pipeline fusing BMKG InaTEWS SeisComP and MMI felt-intensity bulletins with the USGS ComCat earthquake catalog across Indonesia. Classifies hypocenters into shallow crustal fault, subduction megathrust, and deep Wadati-Benioff intraslab regimes across 16 mapped Indonesian tectonic structures, with an interactive longitude-depth cross-section and offline historical replays for the 2018 Palu and Lombok sequences.
+keywords:
+  - earthquake
+  - indonesia
+  - bmkg
+  - usgs
+  - seismology
+  - megathrust
+  - active-faults
+  - wadati-benioff
+  - cloudflare-workers
+  - maplibre-gl
+references:
+  - type: article
+    title: "Magnitude and energy of earthquakes"
+    authors:
+      - family-names: "Gutenberg"
+        given-names: "Beno"
+      - family-names: "Richter"
+        given-names: "Charles F."
+    journal: "Annals of Geophysics"
+    year: 1956
+    volume: 9
+    issue: 1
+    start: 1
+    end: 15
+    doi: "10.4401/ag-5590"
