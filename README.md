@@ -1,6 +1,6 @@
 # Sentinel Seismik · Indonesia Earthquake & Active Fault 3D Monitor
 
-**Real-time 3D Indonesian earthquake observatory fusing BMKG InaTEWS (SeisComP + MMI felt reports) and USGS ComCat — separating shallow crustal faults, subduction megathrusts, and deep Wadati–Benioff intraslab earthquakes with a live hypocenter cross-section.**
+**Real-time 3D Indonesian earthquake observatory fusing BMKG InaTEWS (SeisComP + MMI felt reports) and USGS ComCat — labelling events with approximate shallow crustal, subduction megathrust, and deep Wadati–Benioff intraslab zones, with a live hypocenter cross-section.**
 
 [![Live Map](https://img.shields.io/badge/Live_Map-quake.transbulent.id-ff4d5e?style=flat-square&logo=cloudflare&logoColor=white)](https://quake.transbulent.id/)
 [![Data Fusion](https://img.shields.io/badge/Data-BMKG_InaTEWS_+_USGS_ComCat-ffb020?style=flat-square)](https://inatews.bmkg.go.id/)
