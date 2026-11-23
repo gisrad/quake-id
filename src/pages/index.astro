@@ -1,6 +1,8 @@
 ---
-const title = 'Sentinel Seismik · Peta Gempa, Sesar Aktif & Megathrust Indonesia 3D';
-const description = 'Observatorium gempa bumi real-time 3D seluruh Indonesia (fusi BMKG InaTEWS + USGS ComCat). Memisahkan gempa sesar kerak darat, megathrust subduksi, dan lempeng dalam Wadati–Benioff beserta profil kedalaman.';
+import '../lib/sentinel-status.css';
+
+const title = 'Sentinel Seismik · Katalog dan Peta Gempa Indonesia';
+const description = 'Katalog gempa BMKG dan USGS, profil kedalaman, serta peta zona tektonik perkiraan. Peringatan resmi tetap mengacu pada BMKG InaTEWS.';
 const canonicalUrl = 'https://quake.transbulent.id/';
 const ogImage = 'https://quake.transbulent.id/og-quake.png';
 const structuredData = {
@@ -29,7 +31,7 @@ const structuredData = {
     {
       '@type': 'Dataset',
       name: 'Indonesia Fused BMKG InaTEWS & USGS ComCat Seismicity & Tectonic Regime Catalog (Live + Palu & Lombok 2018 Replays)',
-      description: 'Merged near-real-time Indonesian earthquake catalog combining BMKG InaTEWS felt intensity (MMI) and USGS ComCat hypocenters, classified into crustal fault, subduction megathrust, and deep intraslab regimes across 16 mapped Indonesian fault and trench systems.',
+      description: 'Indonesian earthquake catalog combining reports from BMKG and USGS ComCat. Tectonic zones are approximate estimates, not fault attribution or hazard warnings.',
       url: canonicalUrl,
       isAccessibleForFree: true,
       keywords: [
@@ -96,10 +98,10 @@ const structuredData = {
 
       <button id="latest-felt" class="felt-banner" type="button" hidden>
         <div class="felt-top">
-          <span id="latest-mmi" class="mmi-pill">MMI –</span>
+          <span id="latest-mmi" class="mmi-pill">Gempa terakhir</span>
           <span id="latest-ago" class="felt-ago">–</span>
         </div>
-        <div id="latest-desc" class="felt-desc">Memuat gempa dirasakan…</div>
+        <div id="latest-desc" class="felt-desc"></div>
       </button>
 
       <div id="user-loc-card" class="user-card" hidden>
@@ -114,10 +116,16 @@ const structuredData = {
       </div>
 
       <dl class="stats" aria-label="Ringkasan kegempaan">
-        <div><dt>Dangkal &le;60km</dt><dd id="stat-shallow">–</dd></div>
-        <div class="stat-felt"><dt>Dirasakan</dt><dd id="stat-felt">–</dd></div>
-        <div class="stat-mag"><dt>Mag Maks</dt><dd id="stat-maxmag">–</dd></div>
+        <div><dt>Dangkal ≤60 km</dt><dd id="stat-shallow">–</dd></div>
+        <div class="stat-felt"><dt>Dirasakan · BMKG</dt><dd id="stat-felt">–</dd></div>
+        <div class="stat-mag"><dt>Magnitudo maks.</dt><dd id="stat-maxmag">–</dd></div>
       </dl>
+      <div class="sentinel-status">
+        <p id="live-note" class="note" role="status">Memuat data 24 jam…</p>
+        <button id="retry-live" type="button" hidden>Coba lagi</button>
+        <p id="map-note" class="note" role="status" hidden>Peta belum tersedia. Gunakan daftar untuk melihat detail.</p>
+        <a href="https://inatews.bmkg.go.id/">Info dan peringatan resmi BMKG InaTEWS</a>
+      </div>
 
       <div id="panel-body">
         <div class="seg" role="group" aria-label="Mode tampilan">
@@ -132,7 +140,6 @@ const structuredData = {
             <button type="button" data-hours="168" aria-pressed="false">7 h</button>
             <button type="button" data-hours="720" aria-pressed="false">30 h</button>
           </div>
-          <p id="live-note" class="note" role="status"></p>
         </section>
 
         <section id="replay-controls" hidden>
@@ -161,8 +168,8 @@ const structuredData = {
         </div>
 
         <div class="source-pills" role="group" aria-label="Filter rezim tektonik gempa">
-          <button type="button" data-regime="crustal" aria-pressed="true"><i class="sw sw-crust"></i>Sesar · Kerak</button>
-          <button type="button" data-regime="megathrust" aria-pressed="true"><i class="sw sw-mega"></i>Megathrust</button>
+          <button type="button" data-regime="crustal" aria-pressed="true"><i class="sw sw-crust"></i>Zona kerak</button>
+          <button type="button" data-regime="megathrust" aria-pressed="true"><i class="sw sw-mega"></i>Dekat megathrust</button>
           <button type="button" data-regime="intraslab" aria-pressed="true"><i class="sw sw-slab"></i>Dalam &gt;60</button>
         </div>
 
@@ -175,26 +182,32 @@ const structuredData = {
 
         <div class="layers">
           <label><input id="filter-mag" type="checkbox" /> M 4.0+</label>
-          <label><input id="toggle-faults" type="checkbox" checked /> Sesar &amp; Palung</label>
-          <label><input id="toggle-3d" type="checkbox" /> Medan 3D</label>
-          <label><input id="toggle-imagery" type="checkbox" /> Satelit</label>
+          <label><input id="toggle-faults" type="checkbox" data-map-control disabled checked /> Sesar &amp; Palung</label>
+          <label><input id="toggle-3d" type="checkbox" data-map-control disabled /> Medan 3D</label>
+          <label><input id="toggle-imagery" type="checkbox" data-map-control disabled /> Satelit</label>
         </div>
 
-        <div class="list-tabs" role="tablist" aria-label="Kategori gempa bumi">
-          <button id="tab-shallow" type="button" role="tab" data-list-tab="shallow" aria-selected="true">Dangkal &amp; Dirasakan (0)</button>
-          <button id="tab-deep" type="button" role="tab" data-list-tab="deep" aria-selected="false">Lempeng Dalam (0)</button>
+        <div class="list-tabs" role="group" aria-label="Kategori daftar gempa">
+          <button id="tab-shallow" type="button" data-list-tab="shallow" aria-pressed="true">Gempa dangkal</button>
+          <button id="tab-deep" type="button" data-list-tab="deep" aria-pressed="false">Gempa dalam</button>
         </div>
         <p id="incident-empty" class="note" hidden>Tidak ada kejadian pada filter yang aktif.</p>
         <ol id="incident-list"></ol>
 
         <details class="about">
           <summary>Tentang data &amp; pemisahan tektonik</summary>
-          <p><strong>Fusi Katalog Real-Time (tiap 5 mnt):</strong> Menggabungkan aliran seismograf <strong>BMKG InaTEWS SeisComP</strong> (semua gempa terkonfirmasi M&ge;2.0, jeda 2–5 menit dari kejadian), laporan getaran MMI resmi BMKG, dan <strong>USGS ComCat</strong> 30 hari. Kejadian ganda dalam &le;95 km &amp; &plusmn;120 detik dipadukan otomatis.</p>
-          <p><strong>3 Rezim Tektonik:</strong> Gempa kerak/sesar darat (&le;35 km dekat jalur sesar aktif) dipisahkan dari zona kontak megathrust (&le;60 km) dan gempa lempeng menunjam Wadati–Benioff (&gt;60 km hingga 650 km) yang energinya lebih teredam sebelum mencapai permukaan.</p>
-          <p>Peringatan dini tsunami resmi sepenuhnya mengacu pada <strong>BMKG InaTEWS</strong>.</p>
+          <p>Katalog ini memadukan laporan BMKG dan USGS. Data dapat berubah setelah pemeriksaan lanjutan. Cakupan berbeda menurut sumber, waktu, dan magnitudo. Pencocokan antarsumber menggunakan perkiraan jarak, waktu, dan magnitudo.</p>
+          <p>Zona tektonik diperkirakan dari lokasi dan kedalaman. Zona atau sesar terdekat tidak membuktikan penyebab gempa. Magnitudo mengukur ukuran gempa; MMI menggambarkan intensitas guncangan di suatu lokasi.</p>
+          <p>Keterangan katalog bukan peringatan aktif. Ikuti <a href="https://inatews.bmkg.go.id/">informasi resmi BMKG InaTEWS</a>.</p>
         </details>
       </div>
     </aside>
+
+    <dialog id="event-detail" aria-labelledby="detail-heading">
+      <h2 id="detail-heading">Detail gempa</h2>
+      <div data-detail></div>
+      <form method="dialog"><button type="submit">Tutup</button></form>
+    </dialog>
 
     <button id="panel-reopen" type="button" aria-label="Buka panel Sentinel Seismik" hidden>
       <span class="dot" aria-hidden="true"></span>
@@ -203,12 +216,12 @@ const structuredData = {
 
     <nav id="region-bar" aria-label="Fokus busur tektonik Indonesia">
       <button id="btn-locate" type="button" class="loc-pill" aria-pressed="false" title="Tandai posisi Anda lewat Wi-Fi / GPS">⌖ Lokasi Saya</button>
-      <button type="button" data-region="nusantara" aria-pressed="true">Nusantara</button>
-      <button type="button" data-region="sumatera" aria-pressed="false">Sumatera</button>
-      <button type="button" data-region="jawa_nusa" aria-pressed="false">Jawa · Nusa</button>
-      <button type="button" data-region="sulawesi" aria-pressed="false">Sulawesi</button>
-      <button type="button" data-region="maluku_banda" aria-pressed="false">Maluku · Banda</button>
-      <button type="button" data-region="papua" aria-pressed="false">Papua</button>
+      <button type="button" data-region="nusantara" data-map-control disabled aria-pressed="true">Nusantara</button>
+      <button type="button" data-region="sumatera" data-map-control disabled aria-pressed="false">Sumatera</button>
+      <button type="button" data-region="jawa_nusa" data-map-control disabled aria-pressed="false">Jawa · Nusa</button>
+      <button type="button" data-region="sulawesi" data-map-control disabled aria-pressed="false">Sulawesi</button>
+      <button type="button" data-region="maluku_banda" data-map-control disabled aria-pressed="false">Maluku · Banda</button>
+      <button type="button" data-region="papua" data-map-control disabled aria-pressed="false">Papua</button>
     </nav>
 
     <div id="geo-prompt" class="geo-prompt" role="region" aria-label="Permintaan lokasi perangkat" hidden>
@@ -372,25 +385,24 @@ const structuredData = {
         margin: 10px 14px 2px;
         padding: 8px 10px;
         text-align: left;
-        background: rgba(255, 77, 94, 0.09);
-        border: 1px solid rgba(255, 77, 94, 0.35);
-        border-left: 3px solid var(--crustal);
+        background: rgba(255, 255, 255, 0.045);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--ash);
         border-radius: 6px;
         color: var(--fg);
         cursor: pointer;
       }
-      .felt-banner:hover { background: rgba(255, 77, 94, 0.16); border-color: var(--crustal); }
+      .felt-banner:hover { background: rgba(255, 255, 255, 0.08); border-color: var(--ash); }
       .felt-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .mmi-pill {
         font: 700 10px/1 var(--mono);
         padding: 3px 6px;
         border-radius: 4px;
-        background: var(--crustal);
-        color: #090d14;
+        background: var(--line);
+        color: var(--fg);
         letter-spacing: 0.04em;
         text-transform: uppercase;
       }
-      .mmi-pill.tsunami { background: #ef4444; color: #fff; }
       .felt-ago { font: 600 11px/1 var(--mono); color: var(--ash); }
       .felt-desc { font: 700 12.5px/1.3 var(--sans); color: var(--fg); }
 
@@ -687,7 +699,7 @@ const structuredData = {
         padding: 6px 4px;
         cursor: pointer;
       }
-      .list-tabs button[aria-selected="true"] {
+      .list-tabs button[aria-pressed="true"] {
         color: var(--fg);
         border-bottom-color: var(--crustal);
       }
@@ -732,7 +744,6 @@ const structuredData = {
         flex: none;
       }
       .kind-badge.felt { color: #090d14; background: var(--felt); }
-      .kind-badge.tsunami { color: #fff; background: #ef4444; }
       .kind-badge.bmkg { color: var(--mega); border: 1px solid rgba(255, 176, 32, 0.45); }
 
       .inc-meta { font: 11px/1.3 var(--mono); color: var(--ash); }

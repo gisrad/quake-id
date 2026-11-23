@@ -1,5 +1,5 @@
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import { createLiveFeed, describeLive, showSentinelDetail } from '../lib/sentinel-live.js';
+import { startSentinelMap } from '../lib/sentinel-map.js';
 import {
   REGIONS,
   MOBILE_INITIAL_BOUNDS,
@@ -15,7 +15,6 @@ const TERRARIUM = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{
 const IMAGERY = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 const REPLAY_URL = '/data/replays-quake.json';
 const HOUR = 3600;
-const ROMAN_MMI = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
 
 const $ = (id) => document.getElementById(id);
 const fmtNum = new Intl.NumberFormat('id-ID');
@@ -59,21 +58,12 @@ function getMapPadding() {
   return { top: 60, right: 28, bottom: 28, left: leftInset };
 }
 
-const map = new maplibregl.Map({
-  container: 'map',
-  style: STYLE,
-  bounds: isMobile() ? MOBILE_INITIAL_BOUNDS : REGIONS[0].bounds,
-  fitBoundsOptions: { padding: getMapPadding(), maxZoom: 6 },
-  maxBounds: INDONESIA_MAX_BOUNDS,
-  maxPitch: 78,
-  attributionControl: { compact: true, customAttribution: 'Seismik: BMKG InaTEWS & USGS ComCat · DEM: AWS Terrain' }
-});
-map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
-map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
+let map;
+let maplibregl;
 
 const pulseEl = document.createElement('div');
 pulseEl.className = 'seismic-pulse-marker';
-const pulseMarker = new maplibregl.Marker({ element: pulseEl, anchor: 'center' });
+let pulseMarker;
 let activePopup = null;
 
 const state = {
@@ -89,7 +79,6 @@ const state = {
   playing: false,
   timer: null,
   lastListRender: 0,
-  liveAbort: null,
   replayToken: 0,
   activeRegion: 'nusantara',
   activeListTab: 'shallow',
@@ -97,6 +86,25 @@ const state = {
   renderedEvents: [],
   userLoc: null
 };
+
+const wib = (ts) => formatZoneTime(ts, 'WIB');
+const liveFeed = createLiveFeed({
+  endpoint: '/api/quakes',
+  recordsKey: 'events',
+  onView(view) {
+    const changed = state.live !== view.data || state.livePhase !== view.phase;
+    state.live = view.data;
+    state.livePhase = view.phase;
+    const newest = view.data?.events[0];
+    const note = $('live-note');
+    note.classList.toggle('warn', ['partial', 'stale', 'unavailable'].includes(view.phase));
+    note.textContent = describeLive(view, wib, newest
+      ? `Gempa terakhir ${formatZoneTime(newest.ts, locateIndonesia(newest.lat, newest.lon).tz)}`
+      : '');
+    $('retry-live').hidden = view.phase !== 'unavailable';
+    if (changed) render(true);
+  }
+});
 
 const fc = (features) => ({ type: 'FeatureCollection', features });
 
@@ -112,7 +120,7 @@ function focusRegion(regionId, animate = true) {
   setRegionPressed(target.id);
   const useMobileTight = isMobile() && target.id === 'nusantara';
   const bounds = useMobileTight ? MOBILE_INITIAL_BOUNDS : target.bounds;
-  map.fitBounds(bounds, {
+  map?.fitBounds(bounds, {
     padding: getMapPadding(),
     maxZoom: target.id === 'nusantara' ? 6 : 8.5,
     duration: animate && !reducedMotion() ? 700 : 0
@@ -120,10 +128,15 @@ function focusRegion(regionId, animate = true) {
 }
 
 function flyToQuake(ev) {
+  if (!map) {
+    showQuakePopup(ev);
+    return;
+  }
   setRegionPressed('');
   if (isMobile() && panelEl.dataset.open === 'true') {
     panelEl.dataset.open = 'false';
     syncPanelChrome();
+    toggleBtn.focus();
   }
   const targetZoom = Math.max(map.getZoom(), ev.depth > 150 ? 6.5 : 8.2);
   map.flyTo({
@@ -216,8 +229,8 @@ function renderDepthProfile(events) {
     filtered.length <= 360
       ? filtered
       : [
-          ...filtered.filter((e) => e.mmi >= 2 || e.felt || e.tsunami || e.mag >= 4.0),
-          ...filtered.filter((e) => !(e.mmi >= 2 || e.felt || e.tsunami || e.mag >= 4.0))
+          ...filtered.filter((e) => e.mmi >= 2 || e.felt || e.mag >= 4.0),
+          ...filtered.filter((e) => !(e.mmi >= 2 || e.felt || e.mag >= 4.0))
         ].slice(0, 360);
   const ordered = [...capped].sort((a, b) => a.mag - b.mag);
   const fillMap = { crustal: '#ff4d5e', megathrust: '#ffb020', intraslab: '#38bdf8' };
@@ -252,25 +265,25 @@ function renderDepthProfile(events) {
 // ---------- render daftar & UI ----------
 function showQuakePopup(ev) {
   if (activePopup) activePopup.remove();
-  const el = document.createElement('div');
+  const el = document.createElement('dl');
   el.className = 'pop';
 
   const rows = [
-    ['Magnitudo', `M ${ev.mag.toFixed(1)} (${ev.magType || 'Mw'})`],
-    ['Rezim', ev.regimeLabel],
+    ['Magnitudo', `M ${ev.mag.toFixed(1)}${ev.magType ? ` (${ev.magType})` : ''}`],
+    ['Zona perkiraan', ev.regimeLabel],
     ['Kedalaman', `${Number(ev.depth).toFixed(0)} km`],
     ['Lokasi', ev.place],
     ['Wilayah', ev.loc.province],
     ['Waktu', `${formatZoneTime(ev.ts, ev.loc.tz)} (${utcLabel(ev.ts)})`]
   ];
-  if (ev.structureName) rows.push(['Struktur Dekat', `${ev.structureName} (~${ev.distKm} km)`]);
+  if (ev.structureName) rows.push(['Struktur dekat (bukan penyebab)', `${ev.structureName} (~${ev.distKm} km)`]);
   if (state.userLoc) {
     const dk = haversineKm(state.userLoc.lat, state.userLoc.lon, ev.lat, ev.lon);
     rows.push(['Jarak dari Anda', formatDistKm(dk)]);
   }
   if (ev.felt) rows.push(['Dirasakan (BMKG)', ev.felt]);
-  if (ev.potensi) rows.push(['Potensi', ev.potensi]);
-  rows.push(['Energi Radiasi', ev.energyLabel]);
+  if (state.mode === 'live' && ev.potensi) rows.push(['Keterangan katalog BMKG (bukan peringatan aktif)', ev.potensi]);
+  rows.push(['Perkiraan energi radiasi', ev.energyLabel]);
   rows.push(['Katalog', ev.src]);
 
   for (const [k, v] of rows) {
@@ -294,6 +307,10 @@ function showQuakePopup(ev) {
     el.append(dt, dd);
   }
 
+  if (!map) {
+    showSentinelDetail(el);
+    return;
+  }
   activePopup = new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
     .setLngLat([ev.lon, ev.lat])
     .setDOMContent(el)
@@ -306,30 +323,32 @@ function updateSummary(visible, allCount, hiddenLowMag) {
     el.textContent =
       hiddenLowMag > 0 && allCount > 0
         ? `Semua ${fmtNum.format(allCount)} gempa di bawah M4.0 — matikan filter M 4.0+ untuk melihat gempa lokal.`
-        : 'Tidak ada kejadian pada rentang waktu yang dipilih.';
+        : state.mode === 'live' && state.livePhase !== 'empty'
+          ? 'Belum ada kejadian pada data yang tersedia; cakupan bisa tidak lengkap.'
+          : 'Tidak ada kejadian tercatat dalam rentang ini.';
     return;
   }
   const crustalN = visible.filter((e) => e.regime === 'crustal').length;
   const megaN = visible.filter((e) => e.regime === 'megathrust').length;
   const slabN = visible.filter((e) => e.regime === 'intraslab').length;
-  const feltN = visible.filter((e) => e.mmi >= 2 || e.felt).length;
+  const feltN = visible.filter((e) => e.felt).length;
 
   const byProv = new Map();
   for (const e of visible) byProv.set(e.loc.province, (byProv.get(e.loc.province) || 0) + 1);
   const [topProv, topCnt] = [...byProv.entries()].sort((a, b) => b[1] - a[1])[0];
 
-  const parts = [`Aktivitas tertinggi di ${topProv} (${topCnt} kejadian)`];
-  parts.push(`${crustalN} sesar · ${megaN} megathrust · ${slabN} lempeng dalam`);
+  const parts = [`${topCnt} kejadian di wilayah perkiraan ${topProv}`];
+  parts.push(`Zona perkiraan: ${crustalN} kerak · ${megaN} dekat megathrust · ${slabN} lempeng dalam`);
   if (feltN > 0) parts.push(`${feltN} dirasakan`);
   el.textContent = `${parts.join(' · ')}.`;
 }
 
-function renderList(shallowList, deepList) {
-  $('tab-shallow').textContent = `Dangkal & Dirasakan (${fmtNum.format(shallowList.length)})`;
-  $('tab-deep').textContent = `Lempeng Dalam (${fmtNum.format(deepList.length)})`;
+function renderList(shallowList, deepList, known) {
+  $('tab-shallow').textContent = known ? `Gempa dangkal (${fmtNum.format(shallowList.length)})` : 'Gempa dangkal';
+  $('tab-deep').textContent = known ? `Gempa dalam (${fmtNum.format(deepList.length)})` : 'Gempa dalam';
 
   const items = (state.activeListTab === 'deep' ? deepList : shallowList).slice(0, 12);
-  $('incident-empty').hidden = items.length > 0;
+  $('incident-empty').hidden = !known || items.length > 0;
   const ol = $('incident-list');
   ol.replaceChildren();
 
@@ -353,15 +372,10 @@ function renderList(shallowList, deepList) {
     top.textContent = ev.place;
     head.appendChild(top);
 
-    if (ev.tsunami) {
-      const tag = document.createElement('span');
-      tag.className = 'kind-badge tsunami';
-      tag.textContent = 'TSUNAMI';
-      head.appendChild(tag);
-    } else if (ev.mmi && ev.mmi >= 2) {
+    if (ev.felt) {
       const tag = document.createElement('span');
       tag.className = 'kind-badge felt';
-      tag.textContent = `MMI ${ROMAN_MMI[ev.mmi] || ev.mmi}`;
+      tag.textContent = 'Dirasakan · BMKG';
       head.appendChild(tag);
     } else if (ev.src.includes('BMKG')) {
       const tag = document.createElement('span');
@@ -372,7 +386,7 @@ function renderList(shallowList, deepList) {
 
     const meta = document.createElement('span');
     meta.className = 'inc-meta';
-    const structPart = ev.structureName ? ` · ${ev.structureName}` : ` · ${ev.loc.province}`;
+    const structPart = ev.structureName ? ` · Dekat ${ev.structureName}` : ` · ${ev.loc.province}`;
     const distPart = state.userLoc
       ? ` · ${formatDistKm(haversineKm(state.userLoc.lat, state.userLoc.lon, ev.lat, ev.lon))}`
       : '';
@@ -395,50 +409,39 @@ function renderList(shallowList, deepList) {
 
 function updateLatestFeltBanner(events) {
   const banner = $('latest-felt');
-  let hero = null;
-  if (state.mode === 'replay') {
-    hero = [...events].sort((a, b) => (b.mmi || 0) - (a.mmi || 0) || b.mag - a.mag || b.ts - a.ts)[0];
-  } else {
-    const feltOnly = events
-      .filter((e) => e.tsunami || e.mmi >= 2 || e.felt)
-      .sort((a, b) => (b.tsunami ? 1 : 0) - (a.tsunami ? 1 : 0) || b.ts - a.ts);
-    const sigOnly = events.filter((e) => e.mag >= 5.2).sort((a, b) => b.ts - a.ts);
-    hero = feltOnly[0] || sigOnly[0] || events[0];
-  }
+  const hero = state.mode === 'replay'
+    ? events.reduce((best, ev) => !best || (ev.mmi || 0) > (best.mmi || 0) ||
+        ((ev.mmi || 0) === (best.mmi || 0) && ev.mag > best.mag) ? ev : best, null)
+    : events[0];
   if (!hero) {
     banner.hidden = true;
-    pulseMarker.remove();
+    pulseMarker?.remove();
     return;
   }
 
   banner.hidden = false;
   const mmiEl = $('latest-mmi');
-  mmiEl.className = hero.tsunami ? 'mmi-pill tsunami' : 'mmi-pill';
-  mmiEl.textContent = hero.tsunami
-    ? 'POTENSI TSUNAMI'
-    : hero.mmi >= 2
-      ? `MMI ${ROMAN_MMI[hero.mmi] || hero.mmi} · ${state.mode === 'replay' ? 'PUNCAK REPLAY' : 'DIRASAKAN'}`
-      : hero.src.includes('BMKG')
-        ? 'BMKG TERKINI'
-        : `M${hero.mag.toFixed(1)} TERBARU`;
+  mmiEl.textContent = state.mode === 'replay' ? 'Arsip · kejadian pilihan' : 'Gempa terakhir';
 
   $('latest-ago').textContent = state.mode === 'replay' ? formatZoneTime(hero.ts, hero.loc.tz) : formatTimeAgo(hero.ts);
   $('latest-desc').textContent = `M${hero.mag.toFixed(1)} · ${Math.round(hero.depth)} km · ${hero.place}`;
   banner.onclick = () => flyToQuake(hero);
 
-  pulseMarker.setLngLat([hero.lon, hero.lat]).addTo(map);
+  if (map && state.mode === 'live' && Date.now() / 1000 - hero.ts < HOUR) {
+    pulseMarker.setLngLat([hero.lon, hero.lat]).addTo(map);
+  } else pulseMarker?.remove();
 }
 
 function setListTab(tab) {
   state.activeListTab = tab;
   for (const b of document.querySelectorAll('[data-list-tab]')) {
-    b.setAttribute('aria-selected', String(b.dataset.listTab === tab));
+    b.setAttribute('aria-pressed', String(b.dataset.listTab === tab));
   }
   render(true);
 }
 
 function syncLayerFilters() {
-  if (!map.getLayer('quakes-shallow-core')) return;
+  if (!map?.getLayer('quakes-shallow-core')) return;
   const reg = state.showRegimes;
   const allowedShallow = [];
   if (reg.crustal) allowedShallow.push('crustal');
@@ -484,8 +487,8 @@ function syncHeadlinePulse() {
 }
 
 function render(forceList = true) {
-  const src = map.getSource('quakes');
-  if (!src) return;
+  const available = state.mode === 'live' ? state.live : activeScenario();
+  const src = map?.getSource('quakes');
 
   const rawAll = currentRawEvents();
   const visible = [];
@@ -500,34 +503,33 @@ function render(forceList = true) {
   }
   state.renderedEvents = visible;
 
-  const features = visible.map((ev) => ({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [ev.lon, ev.lat] },
-    properties: {
-      id: ev.id,
-      mag: ev.mag,
-      depth: ev.depth,
-      regime: ev.regime,
-      mmi: ev.mmi || 0,
-      tsunami: ev.tsunami ? 1 : 0,
-      felt: ev.felt ? 1 : 0
-    }
-  }));
-  src.setData(fc(features));
-  syncLayerFilters();
+  if (src) {
+    src.setData(fc(visible.map((ev) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [ev.lon, ev.lat] },
+      properties: {
+        id: ev.id, mag: ev.mag, depth: ev.depth, regime: ev.regime, mmi: ev.mmi || 0, felt: ev.felt ? 1 : 0
+      }
+    }))));
+    syncLayerFilters();
+  }
 
   const shallowAll = visible.filter((e) => e.regime !== 'intraslab');
   const deepAll = visible.filter((e) => e.regime === 'intraslab');
-  const feltCount = visible.filter((e) => e.mmi >= 2 || e.felt).length;
+  const feltCount = visible.filter((e) => e.felt).length;
   const maxMag = visible.length ? Math.max(...visible.map((e) => e.mag)) : null;
 
-  $('stat-shallow').textContent = fmtNum.format(shallowAll.length);
-  $('stat-felt').textContent = fmtNum.format(feltCount);
+  const known = available && (rawAll.length > 0 || state.mode === 'replay' || state.livePhase === 'empty');
+  $('stat-shallow').textContent = known ? fmtNum.format(shallowAll.length) : '–';
+  $('stat-felt').textContent = known && state.mode === 'live' ? fmtNum.format(feltCount) : '–';
   $('stat-maxmag').textContent = maxMag !== null ? `M${maxMag.toFixed(1)}` : '–';
 
   updateLatestFeltBanner(visible);
   updateUserCard();
-  updateSummary(visible, rawAll.length, hiddenLowMag);
+  if (available) updateSummary(visible, rawAll.length, hiddenLowMag);
+  else $('situation-summary').textContent = state.mode === 'live' && state.livePhase === 'unavailable'
+    ? 'Data gempa belum tersedia.'
+    : '';
   renderDepthProfile(visible);
 
   // Mode Langsung: urutkan kronologis terbaru di atas agar deteksi 2–5 menit terakhir langsung terlihat.
@@ -540,57 +542,17 @@ function render(forceList = true) {
 
   const now = performance.now();
   if (forceList || now - state.lastListRender >= 220) {
-    renderList(shallowSorted, deepSorted);
+    renderList(shallowSorted, deepSorted, known);
     state.lastListRender = now;
   }
 }
 
 // ---------- live & replay ----------
-async function loadLive(silent = false) {
-  const note = $('live-note');
-  if (state.liveAbort) state.liveAbort.abort();
-  state.liveAbort = new AbortController();
-  const { signal } = state.liveAbort;
-
-  if (!silent) {
-    note.className = 'note';
-    note.textContent = 'Memuat aliran BMKG SeisComP + USGS…';
-  }
-  try {
-    const r = await fetch(`/api/quakes?hours=${state.hours}`, { signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (state.mode !== 'live') return;
-    state.live = data;
-    const last = data.last_ingest;
-    const attempt = data.last_attempt;
-    const newest = (data.events || [])[0];
-    if (attempt && attempt.ok === false) {
-      note.className = 'note warn';
-      note.textContent = last
-        ? `Gagal sinkron baru · memakai data ${formatZoneTime(last.at, 'WIB')}.`
-        : 'Katalog gempa gagal dimuat dari sumber hulu.';
-    } else if (newest && last) {
-      const locNewest = locateIndonesia(newest.lat, newest.lon);
-      note.textContent = `Gempa terbaru: ${formatTimeAgo(newest.ts)} (${formatZoneTime(newest.ts, locNewest.tz)}) · Sinkron ${formatZoneTime(last.at, 'WIB')}`;
-    } else if (last) {
-      note.textContent = `Sinkron BMKG + USGS · ${formatZoneTime(last.at, 'WIB')}`;
-    } else {
-      note.textContent = 'Menyiapkan sinkronisasi awal…';
-    }
-    render(true);
-  } catch (err) {
-    if (err.name === 'AbortError' || state.mode !== 'live') return;
-    if (!silent) {
-      note.className = 'note warn';
-      note.textContent = 'Gagal memuat /api/quakes — coba mode Replay Historis.';
-    }
-  }
-}
+// Keep the archive and live requests independent.
 
 setInterval(() => {
   if (state.mode === 'live' && !document.hidden) {
-    loadLive(true);
+    liveFeed.load(state.hours, { background: true });
   }
 }, 120000);
 
@@ -631,7 +593,7 @@ function configureScenario(scenarioId, animateCam = true) {
   $('replay-note').textContent = `${sc.title} · jendela aktif ${sc.windowHours} j (${sc.events.length} kejadian).`;
 
   if (animateCam) {
-    map.fitBounds(sc.bounds, {
+    map?.fitBounds(sc.bounds, {
       padding: getMapPadding(),
       maxZoom: 9,
       duration: reducedMotion() ? 0 : 900
@@ -641,13 +603,20 @@ function configureScenario(scenarioId, animateCam = true) {
 }
 
 async function loadReplay(token) {
-  if (!state.replays) {
-    const r = await fetch(REPLAY_URL);
-    if (!r.ok) return;
-    state.replays = await r.json();
+  try {
+    if (!state.replays) {
+      $('replay-label').textContent = 'Memuat arsip…';
+      const r = await fetch(REPLAY_URL);
+      if (!r.ok) throw new Error('Arsip tidak tersedia');
+      const data = await r.json();
+      if (state.mode !== 'replay' || token !== state.replayToken) return;
+      state.replays = data;
+    }
+    if (state.mode !== 'replay' || token !== state.replayToken) return;
+    configureScenario(state.scenarioId, true);
+  } catch {
+    if (state.mode === 'replay' && token === state.replayToken) $('replay-label').textContent = 'Arsip belum dapat dimuat.';
   }
-  if (state.mode !== 'replay' || token !== state.replayToken) return;
-  configureScenario(state.scenarioId, true);
 }
 
 function updateReplay(forceList = false) {
@@ -659,6 +628,7 @@ function updateReplay(forceList = false) {
 }
 
 function togglePlay(force) {
+  if (force !== false && !activeScenario()) return;
   state.playing = force !== undefined ? force : !state.playing;
   $('replay-play').textContent = state.playing ? 'Jeda' : 'Putar';
   if (state.timer) {
@@ -691,15 +661,22 @@ function setMode(mode, animateCamera = true) {
   $('replay-controls').hidden = mode !== 'replay';
   if (mode === 'live') {
     if (animateCamera) focusRegion(state.activeRegion || 'nusantara', true);
-    loadLive();
+    state.livePhase = undefined;
+    liveFeed.load(state.hours);
   } else {
+    liveFeed.cancel();
+    $('retry-live').hidden = true;
+    $('live-note').classList.remove('warn');
+    $('live-note').textContent = 'Arsip · bukan laporan kejadian terkini';
     state.replayToken += 1;
     setRegionPressed('');
+    render(true);
     loadReplay(state.replayToken);
   }
 }
 
 // ---------- event DOM ----------
+$('retry-live').addEventListener('click', () => liveFeed.load(state.hours));
 for (const b of document.querySelectorAll('[data-mode]')) {
   b.addEventListener('click', () => setMode(b.dataset.mode, true));
 }
@@ -707,7 +684,7 @@ for (const b of document.querySelectorAll('[data-hours]')) {
   b.addEventListener('click', () => {
     state.hours = Number(b.dataset.hours);
     for (const x of document.querySelectorAll('[data-hours]')) x.setAttribute('aria-pressed', String(x === b));
-    loadLive();
+    liveFeed.load(state.hours);
   });
 }
 for (const b of document.querySelectorAll('[data-scenario]')) {
@@ -758,6 +735,7 @@ $('replay-speed').addEventListener('click', () => {
 });
 
 $('toggle-3d').addEventListener('change', (e) => {
+  if (!map) return;
   const dur = reducedMotion() ? 0 : 900;
   if (e.target.checked) {
     map.setTerrain({ source: 'dem', exaggeration: 1.6 });
@@ -770,7 +748,7 @@ $('toggle-3d').addEventListener('change', (e) => {
   }
 });
 $('toggle-imagery').addEventListener('change', (e) => {
-  map.setLayoutProperty('imagery', 'visibility', e.target.checked ? 'visible' : 'none');
+  map?.setLayoutProperty('imagery', 'visibility', e.target.checked ? 'visible' : 'none');
 });
 
 function setPanelOpen(open) {
@@ -784,7 +762,7 @@ reopenBtn.addEventListener('click', () => setPanelOpen(true));
 const userPinEl = document.createElement('div');
 userPinEl.className = 'user-pin-marker';
 userPinEl.title = 'Posisi Anda';
-const userMarker = new maplibregl.Marker({ element: userPinEl, anchor: 'center' });
+let userMarker;
 let geoReqSeq = 0;
 
 function buildAccuracyGeoJson(lon, lat, radiusM) {
@@ -814,7 +792,7 @@ function nearestQuakeFrom(lat, lon) {
 
 function showUserPopup() {
   const u = state.userLoc;
-  if (!u) return;
+  if (!u || !map) return;
   if (activePopup) activePopup.remove();
   const el = document.createElement('div');
   el.className = 'pop';
@@ -849,7 +827,7 @@ userPinEl.addEventListener('click', (e) => {
 
 function flyToUser() {
   const u = state.userLoc;
-  if (!u) return;
+  if (!u || !map) return;
   setRegionPressed('');
   if (u.lon >= 62 && u.lon <= 162 && u.lat >= -45 && u.lat <= 40) {
     map.flyTo({
@@ -884,7 +862,7 @@ function updateUserCard() {
 }
 
 function syncUserAccuracyLayer() {
-  const src = map.getSource('user-acc');
+  const src = map?.getSource('user-acc');
   if (!src) return;
   if (!state.userLoc) {
     src.setData(fc([]));
@@ -911,11 +889,8 @@ function applyUserLocation(pos, shouldFly) {
   const lon = pos.coords.longitude;
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   state.userLoc = { lat, lon, acc: Math.round(pos.coords.accuracy || 0) };
-  try {
-    sessionStorage.removeItem('quake_geo_cleared');
-  } catch {}
   $('geo-prompt').hidden = true;
-  userMarker.setLngLat([lon, lat]).addTo(map);
+  if (map) userMarker.setLngLat([lon, lat]).addTo(map);
   syncUserAccuracyLayer();
   resetLocateButtons();
   render(true);
@@ -925,20 +900,18 @@ function applyUserLocation(pos, shouldFly) {
 function clearUserLocation() {
   geoReqSeq += 1;
   state.userLoc = null;
-  userMarker.remove();
+  userMarker?.remove();
   syncUserAccuracyLayer();
   resetLocateButtons();
-  try {
-    sessionStorage.setItem('quake_geo_cleared', '1');
-  } catch {}
+  $('btn-locate').focus();
   render(true);
 }
 
 function dismissGeoPrompt() {
+  geoReqSeq += 1;
   $('geo-prompt').hidden = true;
-  try {
-    sessionStorage.setItem('quake_geo_dismissed', '1');
-  } catch {}
+  resetLocateButtons();
+  $('btn-locate').focus();
 }
 
 function showGeoError(err) {
@@ -969,7 +942,7 @@ function requestUserLocation({ fly = true, fromPrompt = false } = {}) {
   let settled = false;
   navigator.geolocation.getCurrentPosition(
     (pos1) => {
-      if (reqSeq !== geoReqSeq) return;
+      if (reqSeq !== geoReqSeq || settled) return;
       settled = true;
       applyUserLocation(pos1, fly);
     },
@@ -1004,32 +977,15 @@ $('btn-locate').addEventListener('click', () => {
   if (state.userLoc) {
     flyToUser();
   } else {
-    requestUserLocation({ fly: true, fromPrompt: false });
+    $('geo-prompt-sub').textContent = 'Izin posisi dipakai untuk menghitung jarak di perangkat. Peta dapat bergeser ke sekitar Anda.';
+    $('geo-prompt').hidden = false;
+    $('geo-allow').focus();
   }
 });
 
-async function initGeoPrompt() {
-  let dismissed = false;
-  let cleared = false;
-  try {
-    dismissed = sessionStorage.getItem('quake_geo_dismissed') === '1';
-    cleared = sessionStorage.getItem('quake_geo_cleared') === '1';
-  } catch {}
-  try {
-    if (navigator.permissions?.query) {
-      const perm = await navigator.permissions.query({ name: 'geolocation' });
-      if (perm.state === 'granted') {
-        if (!cleared) requestUserLocation({ fly: false, fromPrompt: false });
-        return;
-      }
-      if (perm.state === 'denied') return;
-    }
-  } catch {}
-  if (!dismissed) $('geo-prompt').hidden = false;
-}
 
 // ---------- layer peta ----------
-map.on('load', () => {
+function addMapLayers() {
   if (typeof map.setSky === 'function') {
     map.setSky({
       'sky-color': '#060910',
@@ -1149,7 +1105,7 @@ map.on('load', () => {
       'circle-radius': feltRadius,
       'circle-color': 'transparent',
       'circle-stroke-width': 1.4,
-      'circle-stroke-color': ['case', ['==', ['get', 'tsunami'], 1], '#ef4444', '#ffffff'],
+      'circle-stroke-color': '#ffffff',
       'circle-stroke-opacity': 0.72
     }
   });
@@ -1246,6 +1202,34 @@ map.on('load', () => {
 
   syncLayerFilters();
   syncUserAccuracyLayer();
-  setMode('live', false);
-  initGeoPrompt();
+}
+
+setMode('live', false);
+startSentinelMap(() => ({
+  container: 'map',
+  style: STYLE,
+  bounds: isMobile() ? MOBILE_INITIAL_BOUNDS : REGIONS[0].bounds,
+  fitBoundsOptions: { padding: getMapPadding(), maxZoom: 6 },
+  maxBounds: INDONESIA_MAX_BOUNDS,
+  maxPitch: 78,
+  attributionControl: { compact: true, customAttribution: 'Seismik: BMKG InaTEWS & USGS ComCat · DEM: AWS Terrain' }
+}), (readyMap, library) => {
+  map = readyMap;
+  maplibregl = library;
+  pulseMarker = new maplibregl.Marker({ element: pulseEl, anchor: 'center' });
+  userMarker = new maplibregl.Marker({ element: userPinEl, anchor: 'center' });
+  addMapLayers();
+  for (const control of document.querySelectorAll('[data-map-control]')) control.disabled = false;
+  const scenario = state.mode === 'replay' && activeScenario();
+  if (scenario) map.fitBounds(scenario.bounds, { padding: getMapPadding(), duration: 0 });
+  if (state.userLoc) userMarker.setLngLat([state.userLoc.lon, state.userLoc.lat]).addTo(map);
+  render(true);
+}, () => {
+  map = undefined;
+  pulseMarker = undefined;
+  userMarker = undefined;
+  activePopup = null;
+  $('map-note').hidden = false;
+  for (const control of document.querySelectorAll('[data-map-control]')) control.disabled = true;
+  setPanelOpen(true);
 });

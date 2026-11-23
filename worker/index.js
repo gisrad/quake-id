@@ -1,4 +1,6 @@
 // Worker publik quake.transbulent.id: aset statis, fusi real-time BMKG SeisComP (live30event + gempaQL) + BMKG MMI + USGS ComCat ke D1.
+import { describeIngest, publicRun, recordIngestFailure, sourceFailure, withIngestLease } from './sentinel-ingest.js';
+
 
 const USGS_BASE = 'https://earthquake.usgs.gov/fdsnws/event/1/query';
 const BMKG_BASE = 'https://data.bmkg.go.id/DataMKG/TEWS';
@@ -6,12 +8,11 @@ const INATEWS_GCS = 'https://bmkg-content-inatews.storage.googleapis.com';
 const BBOX = { minLon: 94.0, maxLon: 141.2, minLat: -11.8, maxLat: 7.0 };
 
 const RETAIN_SECONDS = 30 * 24 * 3600;
-const STALE_SECONDS = 4 * 60;
-const LOCK_SECONDS = 60;
-const RETRY_COOLDOWN_SECONDS = 90;
+const STALE_SECONDS = 10 * 60;
+const SOURCES = ['USGS', 'BMKG_live30', 'BMKG_gempaQL', 'BMKG_auto', 'BMKG_dirasakan', 'BMKG_terkini'];
 const VALID_HOURS = [24, 72, 168, 720];
-const CACHE_VER = 2;
-const ROWS_PER_INSERT = 5; // 16 kolom x 5 baris = 80 parameter (< batas 100 parameter D1)
+const CACHE_VER = 3;
+const ROWS_PER_INSERT = 5; // 15 kolom x 5 baris = 75 parameter (< batas 100 parameter D1)
 
 const CSP = [
   "default-src 'self'",
@@ -131,14 +132,13 @@ function parseLive30Xml(xmlText) {
       lon: Number(lon.toFixed(4)),
       depth_km: Number(Math.max(1, Number.isFinite(depth) ? depth : 10).toFixed(1)),
       mag: Number(mag.toFixed(1)),
-      mag_type: 'Mw/ML',
+      mag_type: null,
       source: 'BMKG-RT',
       place: area || null,
       bmkg_wilayah: null,
       bmkg_dirasakan: null,
       max_mmi: null,
       potensi: null,
-      tsunami: 0,
       shakemap: null,
       url: null
     });
@@ -167,14 +167,13 @@ function parseGempaQl(geo) {
       lon: Number(lon.toFixed(4)),
       depth_km: Number(Math.max(1, Number.isFinite(depth) ? depth : 10).toFixed(1)),
       mag: Number(mag.toFixed(1)),
-      mag_type: 'Mw/ML',
+      mag_type: p.magType || null,
       source: 'BMKG-RT',
       place: p.place ? String(p.place).trim() : null,
       bmkg_wilayah: null,
       bmkg_dirasakan: null,
       max_mmi: null,
       potensi: null,
-      tsunami: 0,
       shakemap: null,
       url: null
     });
@@ -221,7 +220,6 @@ function parseBmkgAdvisory(item) {
     bmkg_dirasakan: dirasakan,
     max_mmi: parseMaxMmi(dirasakan),
     potensi,
-    tsunami: potensi && !/tidak\s+berpotensi/i.test(potensi) && /berpotensi\s+tsunami/i.test(potensi) ? 1 : 0,
     shakemap: item.Shakemap ? String(item.Shakemap).trim() : null
   };
 }
@@ -267,7 +265,6 @@ function needsUpsert(prev, next) {
   if (Math.abs((prev.mag || 0) - next.mag) >= 0.15) return true;
   if (Math.abs((prev.depth_km || 0) - next.depth_km) >= 2.0) return true;
   if ((prev.max_mmi || 0) !== (next.max_mmi || 0)) return true;
-  if ((prev.tsunami || 0) !== (next.tsunami || 0)) return true;
   if ((prev.bmkg_dirasakan || '') !== (next.bmkg_dirasakan || '')) return true;
   if ((prev.bmkg_wilayah || '') !== (next.bmkg_wilayah || '')) return true;
   if ((prev.potensi || '') !== (next.potensi || '')) return true;
@@ -290,7 +287,7 @@ async function ingest(env) {
     const [existingRes, usgsRes, live30Res, gempaQlRes, autoRes, dirasakanRes, terkiniRes] = await Promise.allSettled([
       db
         .prepare(
-          'SELECT id, origin_ts, lat, lon, depth_km, mag, mag_type, source, place, bmkg_wilayah, bmkg_dirasakan, max_mmi, potensi, tsunami, shakemap, url FROM quakes WHERE origin_ts >= ?'
+          'SELECT id, origin_ts, lat, lon, depth_km, mag, mag_type, source, place, bmkg_wilayah, bmkg_dirasakan, max_mmi, potensi, shakemap, url FROM quakes WHERE origin_ts >= ?'
         )
         .bind(now - RETAIN_SECONDS - 86400)
         .all(),
@@ -302,7 +299,8 @@ async function ingest(env) {
       fetchJson(`${BMKG_BASE}/gempaterkini.json`)
     ]);
 
-    const existingRows = existingRes.status === 'fulfilled' ? existingRes.value.results || [] : [];
+    if (existingRes.status !== 'fulfilled') throw new Error('Cannot read existing catalogue');
+    const existingRows = existingRes.value.results || [];
     const existingById = new Map(existingRows.map((r) => [r.id, r]));
     const existingUsgs = existingRows.filter((r) => !r.id.startsWith('bmkg:') && !r.id.startsWith('bmg'));
     const existingBmkgOnly = existingRows.filter((r) => r.id.startsWith('bmkg:') || r.id.startsWith('bmg'));
@@ -312,8 +310,8 @@ async function ingest(env) {
 
     // 1. Proses USGS ComCat GeoJSON (prioritas ID utama jika tersedia)
     const usgsPool = [];
-    if (usgsRes.status === 'fulfilled') {
-      for (const f of usgsRes.value.features || []) {
+    if (usgsRes.status === 'fulfilled' && Array.isArray(usgsRes.value?.features)) {
+      for (const f of usgsRes.value.features) {
         const p = f.properties || {};
         const [lon, lat, depth] = f.geometry?.coordinates || [];
         if (!inBbox(lat, lon) || !Number.isFinite(p.time) || !Number.isFinite(p.mag)) continue;
@@ -335,14 +333,13 @@ async function ingest(env) {
           lon: Number(lon.toFixed(4)),
           depth_km: Number(Math.max(1, depth || 10).toFixed(1)),
           mag: Number((p.mag || 0).toFixed(1)),
-          mag_type: p.magType || 'mb',
+          mag_type: p.magType || null,
           source: hasBmkg ? 'BMKG+USGS' : 'USGS',
           place: p.place || null,
           bmkg_wilayah: prev?.bmkg_wilayah || bmkgMatch?.bmkg_wilayah || null,
           bmkg_dirasakan: prev?.bmkg_dirasakan || bmkgMatch?.bmkg_dirasakan || null,
           max_mmi: mmi,
           potensi: prev?.potensi || bmkgMatch?.potensi || null,
-          tsunami: Math.max(p.tsunami ? 1 : 0, prev?.tsunami || 0, bmkgMatch?.tsunami || 0),
           shakemap: prev?.shakemap || bmkgMatch?.shakemap || null,
           url: p.url || null
         };
@@ -352,7 +349,7 @@ async function ingest(env) {
       results.USGS = usgsPool.length;
       okSources += 1;
     } else {
-      results.USGS = `gagal: ${usgsRes.reason?.message || 'error'}`;
+      results.USGS = sourceFailure(usgsRes.reason);
     }
 
     for (const eu of existingUsgs) {
@@ -362,17 +359,17 @@ async function ingest(env) {
     // 2. Proses BMKG SeisComP real-time (gempaQL 7h + live30event 24j terbaru)
     const seisById = new Map();
     let seisCount = 0;
-    if (gempaQlRes.status === 'fulfilled') {
+    if (gempaQlRes.status === 'fulfilled' && Array.isArray(gempaQlRes.value?.features)) {
       for (const r of parseGempaQl(gempaQlRes.value)) {
         seisById.set(r.id, r);
       }
       results.BMKG_gempaQL = seisById.size;
       okSources += 1;
     } else {
-      results.BMKG_gempaQL = `gagal: ${gempaQlRes.reason?.message || 'error'}`;
+      results.BMKG_gempaQL = sourceFailure(gempaQlRes.reason);
     }
 
-    if (live30Res.status === 'fulfilled') {
+    if (live30Res.status === 'fulfilled' && /<Infogempa(?:\s|\/?>)/i.test(live30Res.value)) {
       const liveRows = parseLive30Xml(live30Res.value);
       for (const r of liveRows) {
         seisById.set(r.id, r);
@@ -380,7 +377,7 @@ async function ingest(env) {
       results.BMKG_live30 = liveRows.length;
       okSources += 1;
     } else {
-      results.BMKG_live30 = `gagal: ${live30Res.reason?.message || 'error'}`;
+      results.BMKG_live30 = sourceFailure(live30Res.reason);
     }
 
     for (const bmg of seisById.values()) {
@@ -403,7 +400,6 @@ async function ingest(env) {
           bmkg_dirasakan: prev?.bmkg_dirasakan || null,
           max_mmi: prev?.max_mmi || null,
           potensi: prev?.potensi || null,
-          tsunami: prev?.tsunami || 0,
           shakemap: prev?.shakemap || null
         });
       }
@@ -418,7 +414,8 @@ async function ingest(env) {
       ['BMKG_dirasakan', dirasakanRes],
       ['BMKG_terkini', terkiniRes]
     ]) {
-      if (resObj.status === 'fulfilled') {
+      if (resObj.status === 'fulfilled' && resObj.value?.Infogempa &&
+          typeof resObj.value.Infogempa === 'object' && 'gempa' in resObj.value.Infogempa) {
         const g = resObj.value?.Infogempa?.gempa;
         const arr = Array.isArray(g) ? g : g ? [g] : [];
         let parsedCount = 0;
@@ -432,7 +429,7 @@ async function ingest(env) {
         results[label] = parsedCount;
         bmkgAdvOk += 1;
       } else {
-        results[label] = `gagal: ${resObj.reason?.message || 'error'}`;
+        results[label] = sourceFailure(resObj.reason);
       }
     }
     if (bmkgAdvOk > 0) okSources += 1;
@@ -449,7 +446,6 @@ async function ingest(env) {
         }
         hit.max_mmi = Math.max(hit.max_mmi || 0, b.max_mmi || 0) || null;
         hit.potensi = hit.potensi || b.potensi;
-        hit.tsunami = Math.max(hit.tsunami || 0, b.tsunami || 0);
         hit.shakemap = hit.shakemap || b.shakemap;
       } else {
         bmkgMerged.push({ ...b });
@@ -482,7 +478,6 @@ async function ingest(env) {
           bmkg_dirasakan: b.bmkg_dirasakan || best.bmkg_dirasakan,
           max_mmi: Math.max(best.max_mmi || 0, b.max_mmi || 0) || null,
           potensi: b.potensi || best.potensi,
-          tsunami: Math.max(best.tsunami || 0, b.tsunami || 0),
           shakemap: b.shakemap || best.shakemap
         };
         candidateMap.set(merged.id, merged);
@@ -498,14 +493,13 @@ async function ingest(env) {
           lon: b.lon,
           depth_km: b.depth_km,
           mag: b.mag,
-          mag_type: 'Mw/ML',
+          mag_type: null,
           source: 'BMKG',
           place: b.bmkg_wilayah,
           bmkg_wilayah: b.bmkg_wilayah,
           bmkg_dirasakan: b.bmkg_dirasakan,
           max_mmi: b.max_mmi,
           potensi: b.potensi,
-          tsunami: b.tsunami,
           shakemap: b.shakemap,
           url: null
         });
@@ -524,7 +518,7 @@ async function ingest(env) {
     const stmts = [];
     for (let i = 0; i < changedRows.length; i += ROWS_PER_INSERT) {
       const chunk = changedRows.slice(i, i + ROWS_PER_INSERT);
-      const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+      const placeholders = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
       const params = chunk.flatMap((r) => [
         r.id,
         r.origin_ts,
@@ -539,14 +533,13 @@ async function ingest(env) {
         r.bmkg_dirasakan,
         r.max_mmi,
         r.potensi,
-        r.tsunami,
         r.shakemap,
         r.url
       ]);
       stmts.push(
         db
           .prepare(
-            `INSERT INTO quakes (id,origin_ts,lat,lon,depth_km,mag,mag_type,source,place,bmkg_wilayah,bmkg_dirasakan,max_mmi,potensi,tsunami,shakemap,url)
+            `INSERT INTO quakes (id,origin_ts,lat,lon,depth_km,mag,mag_type,source,place,bmkg_wilayah,bmkg_dirasakan,max_mmi,potensi,shakemap,url)
              VALUES ${placeholders}
              ON CONFLICT(id) DO UPDATE SET
                origin_ts=excluded.origin_ts,
@@ -561,7 +554,6 @@ async function ingest(env) {
                bmkg_dirasakan=COALESCE(excluded.bmkg_dirasakan, quakes.bmkg_dirasakan),
                max_mmi=COALESCE(MAX(quakes.max_mmi, excluded.max_mmi), excluded.max_mmi, quakes.max_mmi),
                potensi=COALESCE(excluded.potensi, quakes.potensi),
-               tsunami=MAX(quakes.tsunami, excluded.tsunami),
                shakemap=COALESCE(excluded.shakemap, quakes.shakemap),
                url=COALESCE(excluded.url, quakes.url)`
           )
@@ -574,7 +566,7 @@ async function ingest(env) {
     }
 
     const attemptPayload = {
-      at: now,
+      at: Math.floor(Date.now() / 1000),
       ok: okSources > 0,
       ok_sources: okSources,
       total: candidateMap.size,
@@ -595,7 +587,7 @@ async function ingest(env) {
           .prepare("INSERT INTO meta (key,value) VALUES ('last_ingest',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
           .bind(
             JSON.stringify({
-              at: now,
+              at: attemptPayload.at,
               total: candidateMap.size,
               written: changedRows.length,
               ok_sources: okSources,
@@ -611,64 +603,28 @@ async function ingest(env) {
 
     if (okSources > 0) await purgeCache();
     return attemptPayload;
-  } finally {
-    await db.prepare("DELETE FROM meta WHERE key='ingest_lock'").run().catch(() => {});
+  } catch {
+    await recordIngestFailure(db, 'ingest_error');
+    throw new Error('Quake ingest failed');
   }
-}
-
-async function maybeRefresh(env, ctx, forceSyncIfEmpty = false) {
-  const [last, attempt] = await Promise.all([readMetaJson(env, 'last_ingest'), readMetaJson(env, 'last_attempt')]);
-  const now = Math.floor(Date.now() / 1000);
-  if (last && now - last.at < STALE_SECONDS) return { last, attempt, synced: false };
-  if (forceSyncIfEmpty && !last) {
-    const res = await ingest(env);
-    return { last: { at: now, ...res }, attempt: res, synced: true };
-  }
-  if (attempt && !attempt.ok && now - attempt.at < RETRY_COOLDOWN_SECONDS) return { last, attempt, synced: false };
-
-  const claim = await env.DB.prepare(
-    "INSERT INTO meta (key,value) VALUES ('ingest_lock',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(meta.value AS INTEGER) < ?"
-  )
-    .bind(String(now), now - LOCK_SECONDS)
-    .run();
-  if (claim.meta.changes > 0) {
-    ctx.waitUntil(ingest(env).catch((e) => console.error('ingest', e)));
-  }
-  return { last, attempt, synced: false };
 }
 
 async function quakes(url, env, ctx) {
   const hours = snapHours(url.searchParams.get('hours'));
-  const forceRefresh = url.searchParams.get('refresh') === '1';
   const cache = caches.default;
   const cacheKey = quakeCacheRequest(hours);
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
 
-  if (!forceRefresh) {
-    const cached = await cache.match(cacheKey);
-    if (cached) return cached;
-  }
-
-  let last, attempt, synced;
-  if (forceRefresh) {
-    const existingAttempt = await readMetaJson(env, 'last_attempt');
-    const now = Math.floor(Date.now() / 1000);
-    if (!existingAttempt || now - existingAttempt.at >= LOCK_SECONDS) {
-      attempt = await ingest(env);
-      last = await readMetaJson(env, 'last_ingest');
-      synced = true;
-    } else {
-      ({ last, attempt, synced } = await maybeRefresh(env, ctx, true));
-    }
-  } else {
-    ({ last, attempt, synced } = await maybeRefresh(env, ctx, true));
-  }
-
-  const since = Math.floor(Date.now() / 1000) - hours * 3600;
-  const detRes = await env.DB.prepare(
-    'SELECT id, origin_ts, lon, lat, depth_km, mag, mag_type, source, place, bmkg_wilayah, bmkg_dirasakan, max_mmi, potensi, tsunami, shakemap, url FROM quakes WHERE origin_ts >= ? ORDER BY origin_ts DESC'
-  )
-    .bind(since)
-    .all();
+  const now = Math.floor(Date.now() / 1000);
+  const since = now - hours * 3600;
+  const [last, attempt, detRes] = await Promise.all([
+    readMetaJson(env, 'last_ingest'),
+    readMetaJson(env, 'last_attempt'),
+    env.DB.prepare(
+      'SELECT id, origin_ts, lon, lat, depth_km, mag, mag_type, source, place, bmkg_wilayah, bmkg_dirasakan, max_mmi, potensi, shakemap, url FROM quakes WHERE origin_ts >= ? ORDER BY origin_ts DESC'
+    ).bind(since).all()
+  ]);
 
   const events = (detRes.results || [])
     .filter((r) => inBbox(r.lat, r.lon))
@@ -679,34 +635,32 @@ async function quakes(url, env, ctx) {
       lat: r.lat,
       depth: r.depth_km,
       mag: r.mag,
-      magType: r.mag_type,
+      magType: r.mag_type === 'Mw/ML' ? null : r.mag_type,
       src: r.source,
       place: r.bmkg_wilayah || r.place || 'Perairan Indonesia',
       usgsPlace: r.place,
       felt: r.bmkg_dirasakan,
       mmi: r.max_mmi,
       potensi: r.potensi,
-      tsunami: r.tsunami || 0,
       shakemap: r.shakemap,
       url: r.url
     }));
 
-  const [freshLast, freshAttempt] = synced
-    ? [await readMetaJson(env, 'last_ingest'), await readMetaJson(env, 'last_attempt')]
-    : [last, attempt];
+  const health = describeIngest(last, attempt, SOURCES, STALE_SECONDS, now);
 
   const resp = json(
     {
-      generated_at: Math.floor(Date.now() / 1000),
-      last_ingest: freshLast,
-      last_attempt: freshAttempt,
+      generated_at: now,
+      last_ingest: publicRun(last, SOURCES),
+      last_attempt: publicRun(attempt, SOURCES),
+      health,
       hours,
       events
     },
     200,
-    60
+    health.state === 'unavailable' ? 0 : 60
   );
-  ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+  if (health.state !== 'unavailable') ctx.waitUntil(cache.put(cacheKey, resp.clone()));
   return resp;
 }
 
@@ -723,19 +677,17 @@ export default {
     try {
       if (url.pathname === '/api/quakes') return await quakes(url, env, ctx);
       if (url.pathname === '/api/status') {
-        if (url.searchParams.get('refresh') === '1') {
-          const prevAttempt = await readMetaJson(env, 'last_attempt');
-          const now = Math.floor(Date.now() / 1000);
-          if (!prevAttempt || now - prevAttempt.at >= LOCK_SECONDS) {
-            await ingest(env);
-          }
-        }
         const [count, last, attempt] = await Promise.all([
           env.DB.prepare('SELECT COUNT(*) AS n FROM quakes').first(),
           readMetaJson(env, 'last_ingest'),
           readMetaJson(env, 'last_attempt')
         ]);
-        return json({ last_ingest: last, last_attempt: attempt, stored: count.n }, 200, 30);
+        return json({
+          last_ingest: publicRun(last, SOURCES),
+          last_attempt: publicRun(attempt, SOURCES),
+          health: describeIngest(last, attempt, SOURCES, STALE_SECONDS, Math.floor(Date.now() / 1000)),
+          stored: count.n
+        }, 200, 30);
       }
       if (url.pathname.startsWith('/api/')) return json({ error: 'not found' }, 404);
     } catch (err) {
@@ -749,6 +701,6 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(ingest(env));
+    ctx.waitUntil(withIngestLease(env.DB, () => ingest(env)));
   }
 };

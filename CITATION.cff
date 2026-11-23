@@ -6,8 +6,8 @@ authors:
   - family-names: "Fajrianshah"
     given-names: "Evans Azka"
     affiliation: "National Research and Innovation Agency (BRIN); Graduate School, Universitas Gadjah Mada"
-version: 1.0.0
-date-released: "2026-11-22"
+version: 1.1.0
+date-released: "2026-11-24"
 license: MIT
 url: "https://quake.transbulent.id"
 repository-code: "https://github.com/gisrad/quake-id"
