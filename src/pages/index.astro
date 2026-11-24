@@ -285,18 +285,30 @@ const structuredData = {
       #map { position: fixed; inset: 0; }
 
       .seismic-pulse-marker {
-        width: 34px;
-        height: 34px;
-        border-radius: 50%;
-        border: 2px solid var(--crustal);
-        background: rgba(255, 77, 94, 0.14);
+        width: 18px;
+        height: 18px;
+        color: var(--crustal);
         pointer-events: none;
-        animation: seismic-ripple 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+      }
+
+      .seismic-pulse-marker[data-regime='megathrust'] { color: var(--mega); }
+      .seismic-pulse-marker[data-regime='intraslab'] { color: #38bdf8; }
+      .seismic-pulse-marker[data-regime='intraslab'].very-deep { color: #818cf8; }
+
+      /* MapLibre positions the outer marker with transform; only animate its ring. */
+      .seismic-pulse-marker::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border: 1px solid currentColor;
+        border-radius: 50%;
+        opacity: 0;
+        animation: seismic-ripple 2.3s ease-out var(--pulse-delay) 2;
       }
 
       @keyframes seismic-ripple {
-        0% { transform: scale(0.45); opacity: 0.95; }
-        100% { transform: scale(2.1); opacity: 0; }
+        0% { transform: scale(0.78); opacity: 0.52; }
+        68%, 100% { transform: scale(1.78); opacity: 0; }
       }
 
       #panel {
@@ -921,7 +933,7 @@ const structuredData = {
       }
 
       @media (prefers-reduced-motion: reduce) {
-        .seismic-pulse-marker,
+        .seismic-pulse-marker::after,
         .user-pin-marker::after { animation: none !important; }
         *, *::before, *::after {
           transition-duration: 0.01ms !important;

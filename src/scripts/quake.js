@@ -61,9 +61,44 @@ function getMapPadding() {
 let map;
 let maplibregl;
 
-const pulseEl = document.createElement('div');
-pulseEl.className = 'seismic-pulse-marker';
-let pulseMarker;
+const pulseMarkers = new Map();
+const PULSE_LIMIT = 6;
+const PULSE_AGE = 6 * HOUR;
+
+function syncMapPulses() {
+  if (!map) return;
+  const active = new Set();
+  if (state.mode === 'live' && !reducedMotion() && state.livePhase === 'ready') {
+    const cutoff = Date.now() / 1000 - PULSE_AGE;
+    const recent = state.renderedEvents
+      .filter((ev) => ev.ts >= cutoff && state.showRegimes[ev.regime])
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, PULSE_LIMIT);
+    for (const ev of recent) {
+      active.add(ev.id);
+      let marker = pulseMarkers.get(ev.id);
+      if (!marker) {
+        const el = document.createElement('div');
+        el.className = 'seismic-pulse-marker';
+        el.setAttribute('aria-hidden', 'true');
+        el.style.setProperty('--pulse-delay', `${active.size * 170}ms`);
+        marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([ev.lon, ev.lat]).addTo(map);
+        pulseMarkers.set(ev.id, marker);
+      } else {
+        const point = marker.getLngLat();
+        if (point.lng !== ev.lon || point.lat !== ev.lat) marker.setLngLat([ev.lon, ev.lat]);
+      }
+      marker.getElement().dataset.regime = ev.regime;
+      marker.getElement().classList.toggle('very-deep', ev.depth > 300);
+    }
+  }
+  for (const [id, marker] of pulseMarkers) {
+    if (active.has(id)) continue;
+    marker.remove();
+    pulseMarkers.delete(id);
+  }
+}
 let activePopup = null;
 
 const state = {
@@ -415,7 +450,6 @@ function updateLatestFeltBanner(events) {
     : events[0];
   if (!hero) {
     banner.hidden = true;
-    pulseMarker?.remove();
     return;
   }
 
@@ -426,10 +460,6 @@ function updateLatestFeltBanner(events) {
   $('latest-ago').textContent = state.mode === 'replay' ? formatZoneTime(hero.ts, hero.loc.tz) : formatTimeAgo(hero.ts);
   $('latest-desc').textContent = `M${hero.mag.toFixed(1)} · ${Math.round(hero.depth)} km · ${hero.place}`;
   banner.onclick = () => flyToQuake(hero);
-
-  if (map && state.mode === 'live' && Date.now() / 1000 - hero.ts < HOUR) {
-    pulseMarker.setLngLat([hero.lon, hero.lat]).addTo(map);
-  } else pulseMarker?.remove();
 }
 
 function setListTab(tab) {
@@ -481,9 +511,9 @@ function syncLayerFilters() {
   }
 }
 
-function syncHeadlinePulse() {
-  const active = state.renderedEvents.filter((e) => state.showRegimes[e.regime]);
-  updateLatestFeltBanner(active);
+function syncHeadlineAndPulses() {
+  updateLatestFeltBanner(state.renderedEvents.filter((e) => state.showRegimes[e.regime]));
+  syncMapPulses();
 }
 
 function render(forceList = true) {
@@ -524,7 +554,7 @@ function render(forceList = true) {
   $('stat-felt').textContent = known && state.mode === 'live' ? fmtNum.format(feltCount) : '–';
   $('stat-maxmag').textContent = maxMag !== null ? `M${maxMag.toFixed(1)}` : '–';
 
-  updateLatestFeltBanner(visible);
+  syncHeadlineAndPulses();
   updateUserCard();
   if (available) updateSummary(visible, rawAll.length, hiddenLowMag);
   else $('situation-summary').textContent = state.mode === 'live' && state.livePhase === 'unavailable'
@@ -705,7 +735,7 @@ for (const b of document.querySelectorAll('[data-regime]')) {
     state.showRegimes[k] = !state.showRegimes[k];
     b.setAttribute('aria-pressed', String(state.showRegimes[k]));
     syncLayerFilters();
-    syncHeadlinePulse();
+    syncHeadlineAndPulses();
     renderDepthProfile(state.renderedEvents);
   });
 }
@@ -1204,6 +1234,7 @@ function addMapLayers() {
   syncUserAccuracyLayer();
 }
 
+window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', syncMapPulses);
 setMode('live', false);
 startSentinelMap(() => ({
   container: 'map',
@@ -1216,7 +1247,6 @@ startSentinelMap(() => ({
 }), (readyMap, library) => {
   map = readyMap;
   maplibregl = library;
-  pulseMarker = new maplibregl.Marker({ element: pulseEl, anchor: 'center' });
   userMarker = new maplibregl.Marker({ element: userPinEl, anchor: 'center' });
   addMapLayers();
   for (const control of document.querySelectorAll('[data-map-control]')) control.disabled = false;
@@ -1226,7 +1256,7 @@ startSentinelMap(() => ({
   render(true);
 }, () => {
   map = undefined;
-  pulseMarker = undefined;
+  pulseMarkers.clear();
   userMarker = undefined;
   activePopup = null;
   $('map-note').hidden = false;
